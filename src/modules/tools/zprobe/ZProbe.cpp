@@ -40,6 +40,7 @@
 #define fast_feedrate_checksum   CHECKSUM("fast_feedrate")
 #define return_feedrate_checksum CHECKSUM("return_feedrate")
 #define probe_height_checksum    CHECKSUM("probe_height")
+#define nozzle_rise_checksum     CHECKSUM("nozzle_rise")       //EB3 Добавлен параметр в config.txt, = смещение сопла от высоты срабатывания дачика, мм. "+", если сопло выше.
 #define gamma_max_checksum       CHECKSUM("gamma_max")
 #define max_z_checksum           CHECKSUM("max_z")
 #define reverse_z_direction_checksum CHECKSUM("reverse_z")
@@ -136,6 +137,7 @@ void ZProbe::config_load()
     }
 
     this->probe_height  = THEKERNEL->config->value(zprobe_checksum, probe_height_checksum)->by_default(5.0F)->as_number();
+    this->nozzle_rise = THEKERNEL->config->value(zprobe_checksum, nozzle_rise_checksum)->by_default(0.0F)->as_number();    // EB3. Nozzle heihght over Probe trigger point, in mm
     this->slow_feedrate = THEKERNEL->config->value(zprobe_checksum, slow_feedrate_checksum)->by_default(5)->as_number(); // feedrate in mm/sec
     this->fast_feedrate = THEKERNEL->config->value(zprobe_checksum, fast_feedrate_checksum)->by_default(100)->as_number(); // feedrate in mm/sec
     this->return_feedrate = THEKERNEL->config->value(zprobe_checksum, return_feedrate_checksum)->by_default(0)->as_number(); // feedrate in mm/sec
@@ -264,11 +266,16 @@ void ZProbe::on_gcode_received(void *argument)
             return;
         }
 
-        // first wait for all moves to finish
-        THEKERNEL->conveyor->wait_for_idle();
+//gcode->stream->printf("DEBUG-1a: Call ProbeToWork...\n");	//EB3 - debug start message
+        ProbeToWork(true);   								//EB3 Probe WorkMode = true, push probe rod down
+//gcode->stream->printf("DEBUG-1b: done\n");				//EB3 - debug end message
+
+		// first wait for all moves to finish
+		THEKERNEL->conveyor->wait_for_idle();
 
         if(this->pin.get()) {
             gcode->stream->printf("ZProbe triggered before move, aborting command.\n");
+            ProbeToWork(false);   //EB3 Probe WorkMode = false, pull probe rod up
             return;
         }
 
@@ -279,6 +286,8 @@ void ZProbe::on_gcode_received(void *argument)
             bool reverse= (gcode->has_letter('R') && gcode->get_value('R') != 0); // specify to probe in reverse direction
             float rate= gcode->has_letter('F') ? gcode->get_value('F') / 60 : this->slow_feedrate;
             float mm;
+            bool DefStd_NoOffsetAdd= (gcode->has_letter('D'));  //EB3 новый параметр 'D' для команды G30. Мнемоника 'Default' (без добавления Probe-Nozzle offset)
+            float l_rise=nozzle_rise;                           //EB3 загруженный из config.txt параметр nozzle_rise менять нельзя. Вводим и инициализируем локальную изменяемую переменную
 
             // if not setting Z then return probe to where it started, otherwise leave it where it is
             probe_result = (set_z ? run_probe(mm, rate, -1, reverse) : run_probe_return(mm, rate, -1, reverse));
@@ -287,28 +296,43 @@ void ZProbe::on_gcode_received(void *argument)
                 // the result is in actuator coordinates moved
                 gcode->stream->printf("Z:%1.4f\n", THEKERNEL->robot->from_millimeters(mm));
 
+                //EB3 Если указан параметр "Znnn", то добавляем к nnn наш l_rise. Если это не запрещено параметром "D"
+                //EB3 Если указан параметр "D", то предварительно обнуляем l_rise
                 if(set_z) {
+                  gcode->stream->printf("Rise:%1.4f", l_rise);                    //EB3
+                    if (DefStd_NoOffsetAdd) {                                     //EB3
+                        l_rise = 0.0F;                                            //EB3
+                        gcode->stream->printf(" ignored");                        //EB3
+                    }                                                             //EB3
+                    l_rise = l_rise + gcode->get_value('Z');                      //EB3
+                    gcode->stream->printf(", Cmd:%1.4f", gcode->get_value('Z'));  //EB3
+
                     // set current Z to the specified value, shortcut for G92 Znnn
                     char buf[32];
-                    int n = snprintf(buf, sizeof(buf), "G92 Z%f", gcode->get_value('Z'));
+                    //int n = snprintf(buf, sizeof(buf), "G92 Z%f", gcode->get_value('Z'));     // EB3 it is original string
+                    int n = snprintf(buf, sizeof(buf), "G92 Z%f", l_rise);                      // EB3 it is my string
                     string g(buf, n);
                     Gcode gc(g, &(StreamOutput::NullStream));
-                    THEKERNEL->call_event(ON_GCODE_RECEIVED, &gc);
+                    THEKERNEL->call_event(ON_GCODE_RECEIVED, &gc);                 //EB3 Камент для ясности: Вызов G92 из Robot.cpp (line~598). А она  корректирует WCS (=work coordinate system)
+                    gcode->stream->printf(". Set:%1.4f\n", l_rise);                //EB3
                 }
 
             } else {
                 gcode->stream->printf("ZProbe not triggered\n");
             }
+            ProbeToWork(false);                                                    //EB3 Probe WorkMode = false, pull probe rod up
 
         } else {
             if(!gcode->has_letter('P')) {
                 // find the first strategy to handle the gcode
                 for(auto s : strategies){
                     if(s->handleGcode(gcode)) {
+                        ProbeToWork(false);                                        //EB3 Probe WorkMode = false, pull probe rod up
                         return;
                     }
                 }
                 gcode->stream->printf("No strategy found to handle G%d\n", gcode->g);
+                ProbeToWork(false);                                                //EB3 Probe WorkMode = false, pull probe rod up
 
             }else{
                 // P paramater selects which strategy to send the code to
@@ -318,10 +342,12 @@ void ZProbe::on_gcode_received(void *argument)
                     if(!strategies[i]->handleGcode(gcode)){
                         gcode->stream->printf("strategy #%d did not handle G%d\n", i, gcode->g);
                     }
+                    ProbeToWork(false);                                            //EB3 Probe WorkMode = false, pull probe rod up
                     return;
 
                 }else{
                     gcode->stream->printf("strategy #%d is not loaded\n", i);
+                    ProbeToWork(false);                                            //EB3 Probe WorkMode = false, pull probe rod up
                 }
             }
         }
@@ -332,10 +358,12 @@ void ZProbe::on_gcode_received(void *argument)
             gcode->stream->printf("error:Only G38.2 to G38.5 are supported\n");
             return;
         }
+        ProbeToWork(true);                                                         //EB3 Probe WorkMode = true, push probe rod down
 
         // make sure the probe is defined and not already triggered before moving motors
         if(!this->pin.connected()) {
             gcode->stream->printf("error:ZProbe not connected.\n");
+            ProbeToWork(false);                                                    //EB3 Probe WorkMode = false, pull probe rod up
             return;
         }
 
@@ -346,6 +374,7 @@ void ZProbe::on_gcode_received(void *argument)
         }
 
         probe_XYZ(gcode);
+        ProbeToWork(false);                                                        //EB3 Probe WorkMode = false, pull probe rod up
 
         invert_probe = false;
 
@@ -511,4 +540,31 @@ void ZProbe::home()
 {
     Gcode gc(THEKERNEL->is_grbl_mode() ? "G28.2" : "G28", &(StreamOutput::NullStream));
     THEKERNEL->call_event(ON_GCODE_RECEIVED, &gc);
+}
+
+// Опускание щупа (WorkMode=True) и подъем щупа (WorkMode=false)
+// без параметра = опускание
+void ZProbe::ProbeToWork(bool WorkMode)
+{
+    #define CMDLEN 128
+    char *cmd= new char[CMDLEN]; // use heap here to reduce stack usage
+
+    if(WorkMode) {
+		strcpy(cmd, "M280"); 	
+    } else {
+		strcpy(cmd, "M281");
+	}
+
+//THEKERNEL->streams->printf("DEBUG-2: _ZProbe::home_, send: %s: %u\n", cmd, strlen(cmd)); //EB3 Debug message into terminal
+
+    // send as a command line as may have multiple G codes in it, usable any notations: "M280.1S5|G4_P600 M280.1 S2"
+    THEROBOT->push_state();
+    struct SerialMessage message;
+    message.message = cmd;
+    delete [] cmd;
+
+    message.stream = &(StreamOutput::NullStream);
+    THEKERNEL->call_event(ON_CONSOLE_LINE_RECEIVED, &message );
+    THEKERNEL->conveyor->wait_for_idle();
+    THEROBOT->pop_state();
 }
