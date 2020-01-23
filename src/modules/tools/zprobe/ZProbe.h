@@ -38,6 +38,7 @@ public:
 
     void coordinated_move(float x, float y, float z, float feedrate, bool relative=false);
     void home();
+    void ProbeToWork(bool WorkMode=true);
 
     bool getProbeStatus() { return this->pin.get(); }
     float getSlowFeedrate() const { return slow_feedrate; }
@@ -54,6 +55,7 @@ private:
     float fast_feedrate;
     float return_feedrate;
     float probe_height;
+    float nozzle_rise;
     float max_z;
     float dwell_before_probing;
 
