@@ -67,7 +67,7 @@ void Switch::on_halt(void *arg)
         switch(this->output_type) {
             case DIGITAL: this->digital_pin->set(this->failsafe); break;
             case SIGMADELTA: this->sigmadelta_pin->set(this->failsafe); break;
-			case SWMACRO: break;
+            case SWMACRO: break;
             case HWPWM: this->pwm_pin->write(switch_value/100.0F); break;
             case SWPWM: this->swpwm_pin->write(switch_value/100.0F); break;
             case NONE: return;
@@ -197,6 +197,10 @@ void Switch::on_config_reload(void *argument)
         this->output_type= NONE;
         // set to initial state
         this->input_pin_state = this->input_pin->get();
+        if(this->input_pin_behavior == momentary_checksum) {
+            // initialize switch state to same as current pin level
+            this->switch_state = this->input_pin_state;
+        }
         // input pin polling
         THEKERNEL->slow_ticker->attach( 100, this, &Switch::pinpoll_tick);
     }
@@ -345,7 +349,7 @@ void Switch::on_gcode_received(void *argument)
 				// send as a command line as may have multiple G codes in it, usable any notations: "M280.1S5|G4_P600 M280.1 S2"
 				struct SerialMessage message;
 				message.message = this->output_on_command;
-				message.stream = &(StreamOutput::NullStream);			//Ñ‚Ğ°Ğº Ğ±Ñ‹Ğ»Ğ¾ ÑĞ´ĞµĞ»Ğ°Ğ½Ğ¾ Ğ² ZProbe Ğ¸ Ñ€Ğ°Ğ±Ğ¾Ñ‚Ğ°ĞµÑ‚
+				message.stream = &(StreamOutput::NullStream);			//òàê áûëî ñäåëàíî â ZProbe è ğàáîòàåò
 				THEKERNEL->call_event(ON_CONSOLE_LINE_RECEIVED, &message );
 				THEKERNEL->conveyor->wait_for_idle();
 //				//***************************************************** //EB3, for method immediately send command message end
@@ -407,7 +411,7 @@ void Switch::on_gcode_received(void *argument)
 				// send as a command line as may have multiple G codes in it, usable any notations: "M280.1S5|G4_P600 M280.1 S2"
 				struct SerialMessage message;
 				message.message = this->output_off_command;
-				message.stream = &(StreamOutput::NullStream);			//Ñ‚Ğ°Ğº Ğ±Ñ‹Ğ»Ğ¾ ÑĞ´ĞµĞ»Ğ°Ğ½Ğ¾ Ğ² ZProbe Ğ¸ Ñ€Ğ°Ğ±Ğ¾Ñ‚Ğ°ĞµÑ‚
+				message.stream = &(StreamOutput::NullStream);			//òàê áûëî ñäåëàíî â ZProbe è ğàáîòàåò
 				THEKERNEL->call_event(ON_CONSOLE_LINE_RECEIVED, &message );
 				THEKERNEL->conveyor->wait_for_idle();
 				//***************************************************** //EB3, for method immediately send command message end
@@ -469,8 +473,8 @@ void Switch::on_main_loop(void *argument)
 {
     if(this->switch_changed) {
         if(this->switch_state) {
-			if(!this->output_on_command.empty()) this->send_gcode( this->output_on_command, &(StreamOutput::NullStream) );
-			 
+            if(!this->output_on_command.empty()) this->send_gcode( this->output_on_command, &(StreamOutput::NullStream) );
+
             if(this->output_type == SIGMADELTA) {
                 this->sigmadelta_pin->pwm(this->switch_value); // this requires the value has been set otherwise it switches on to whatever it last was
 
@@ -485,8 +489,9 @@ void Switch::on_main_loop(void *argument)
             }
 
         } else {
-			if(!this->output_off_command.empty()) this->send_gcode( this->output_off_command, &(StreamOutput::NullStream) );
-			 	
+
+            if(!this->output_off_command.empty()) this->send_gcode( this->output_off_command, &(StreamOutput::NullStream) );
+
             if(this->output_type == SIGMADELTA) {
                 this->sigmadelta_pin->set(false);
 
