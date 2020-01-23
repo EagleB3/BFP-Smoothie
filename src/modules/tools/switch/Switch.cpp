@@ -67,6 +67,7 @@ void Switch::on_halt(void *arg)
         switch(this->output_type) {
             case DIGITAL: this->digital_pin->set(this->failsafe); break;
             case SIGMADELTA: this->sigmadelta_pin->set(this->failsafe); break;
+			case SWMACRO: break;
             case HWPWM: this->pwm_pin->write(switch_value/100.0F); break;
             case SWPWM: this->swpwm_pin->write(switch_value/100.0F); break;
             case NONE: return;
@@ -154,6 +155,9 @@ void Switch::on_config_reload(void *argument)
                 this->digital_pin= nullptr;
             }
 
+        }else if(type == "swmacro"){
+            this->output_type= SWMACRO;
+
         }else if(type == "hwpwm"){
             this->output_type= HWPWM;
             Pin *pin= new Pin();
@@ -193,10 +197,6 @@ void Switch::on_config_reload(void *argument)
         this->output_type= NONE;
         // set to initial state
         this->input_pin_state = this->input_pin->get();
-        if(this->input_pin_behavior == momentary_checksum) {
-            // initialize switch state to same as current pin level
-            this->switch_state = this->input_pin_state;
-        }
         // input pin polling
         THEKERNEL->slow_ticker->attach( 100, this, &Switch::pinpoll_tick);
     }
@@ -211,6 +211,16 @@ void Switch::on_config_reload(void *argument)
                 this->sigmadelta_pin->set(false);
             }
 
+        } else if(this->output_type == SWMACRO) {	//EB3 Main SWMACRO ON LOAD process begin
+            if(this->switch_state) {
+			std::string default_on_value = THEKERNEL->config->value(switch_checksum, this->name_checksum, default_on_value_checksum )->by_default("")->as_string();
+			if(default_on_value == "on"){
+					this->switch_state = true;		//EB3, for method send message in mail loop cycle
+				} else {
+					this->switch_state = false;		//EB3, for method send message in mail loop cycle
+				}
+				this->switch_changed = true;		//EB3, for method send message in mail loop cycle
+			}										//EB3 Main SWMACRO ON LOAD process end
         } else if(this->output_type == HWPWM) {
             // default is 50Hz
             float p= THEKERNEL->config->value(switch_checksum, this->name_checksum, pwm_period_ms_checksum )->by_default(20)->as_number() * 1000.0F; // ms but fractions are allowed
@@ -323,6 +333,24 @@ void Switch::on_gcode_received(void *argument)
                 this->sigmadelta_pin->pwm(this->switch_value);
                 this->switch_state= (this->switch_value > 0);
             }
+        
+        } else if (this->output_type == SWMACRO) {						//EB3 Main SWMACRO ON process begin
+            // drain queue
+            THEKERNEL->conveyor->wait_for_idle();
+//			THEKERNEL->streams->printf("SWMACRO ON parsed\n");			//EB3 = debug report string for terminal output
+			if(!this->output_on_command.empty()) {
+//				this->switch_state = true;		//TRUE aka ON			//EB3, for method send message in mail loop cycle
+//				this->switch_changed = true;							//EB3, for method send message in mail loop cycle
+//				//***************************************************** //EB3, for method immediately send command message begin
+				// send as a command line as may have multiple G codes in it, usable any notations: "M280.1S5|G4_P600 M280.1 S2"
+				struct SerialMessage message;
+				message.message = this->output_on_command;
+				message.stream = &(StreamOutput::NullStream);			//так было сделано в ZProbe и работает
+				THEKERNEL->call_event(ON_CONSOLE_LINE_RECEIVED, &message );
+				THEKERNEL->conveyor->wait_for_idle();
+//				//***************************************************** //EB3, for method immediately send command message end
+//				THEKERNEL->streams->printf("SWMACRO ON pushed\n");		//EB3 = debug report string for terminal output
+			}															//EB3 - Main SWMACRO ON process end
 
         } else if (this->output_type == HWPWM) {
             // drain queue
@@ -369,6 +397,22 @@ void Switch::on_gcode_received(void *argument)
         if (this->output_type == SIGMADELTA) {
             // SIGMADELTA output pin
             this->sigmadelta_pin->set(false);
+
+        } else if (this->output_type == SWMACRO) {						//EB3 Main SWMACRO OFF process begin
+//			THEKERNEL->streams->printf("SWMACRO OFF parsed\n"); 		//EB3 = debug report terminal string
+			if(!this->output_off_command.empty()) {
+//				this->switch_state = false;		//FALSE aka OFF			//EB3, for method send message in mail loop cycle 
+//				this->switch_changed = true;							//EB3, for method send message in mail loop cycle
+				//***************************************************** //EB3, for method immediately send command message begin
+				// send as a command line as may have multiple G codes in it, usable any notations: "M280.1S5|G4_P600 M280.1 S2"
+				struct SerialMessage message;
+				message.message = this->output_off_command;
+				message.stream = &(StreamOutput::NullStream);			//так было сделано в ZProbe и работает
+				THEKERNEL->call_event(ON_CONSOLE_LINE_RECEIVED, &message );
+				THEKERNEL->conveyor->wait_for_idle();
+				//***************************************************** //EB3, for method immediately send command message end
+//				THEKERNEL->streams->printf("MACRO OFF pushed\n"); 		//EB3 = debug report string for terminal output
+			}															//EB3 Main SWMACRO OFF process end
 
         } else if (this->output_type == HWPWM) {
             this->pwm_pin->write(this->switch_value/100.0F);
@@ -425,8 +469,8 @@ void Switch::on_main_loop(void *argument)
 {
     if(this->switch_changed) {
         if(this->switch_state) {
-            if(!this->output_on_command.empty()) this->send_gcode( this->output_on_command, &(StreamOutput::NullStream) );
-
+			if(!this->output_on_command.empty()) this->send_gcode( this->output_on_command, &(StreamOutput::NullStream) );
+			 
             if(this->output_type == SIGMADELTA) {
                 this->sigmadelta_pin->pwm(this->switch_value); // this requires the value has been set otherwise it switches on to whatever it last was
 
@@ -441,9 +485,8 @@ void Switch::on_main_loop(void *argument)
             }
 
         } else {
-
-            if(!this->output_off_command.empty()) this->send_gcode( this->output_off_command, &(StreamOutput::NullStream) );
-
+			if(!this->output_off_command.empty()) this->send_gcode( this->output_off_command, &(StreamOutput::NullStream) );
+			 	
             if(this->output_type == SIGMADELTA) {
                 this->sigmadelta_pin->set(false);
 
